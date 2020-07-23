@@ -6,7 +6,7 @@
 #ifndef HYPE_HH_
 #define HYPE_HH_
 
-#include "riemann_solver.hh"
+#include "pde.hh"
 #include "headers.hh"
 #include "triangulation.hh"
 
@@ -20,22 +20,26 @@ struct AppCtx {
 	double gamma = 1.4; 
 };
 
-class Hype {
+class HyPE_2D {
+
+	// Typedefs
+
+    typedef boost::multi_array<Vector, 1> array_type;
+    typedef array_type::index index;
 	
 	AppCtx Params;          /* Parameters controlling the solution */
 	Triangulation tria;     /* Object representing the mesh */
 	
-	std::vector<double> (*init_func)(double, double);  /* Initial condition function */
-	Riemann_Solver riemann;
+	Vector (*init_func)(double, double);  /* Initial condition function */
 	
 	double time; 
 	double dt;
 	double h_min; 
 	
-	double*** U;            /* Store the conservative variables along with its components in each cell */
-	double**  W;            /* Store the primitive variables in each cell */
-	double**  F;            /* Store the flux on each in each face */
-	double**  RHS;          /* Store the RHS value for each cell */
+	multi_array<double, 3> U;   /* Conservative variables along with its components in each cell */
+	multi_array<double, 2> W;   /* Primitive variables in each cell */
+	multi_array<double, 2> F;   /* Upwind flux on each in each face */
+	multi_array<double, 2> RHS; /* Update coefficient for each cell */
 	
 	void initialize();     
 	void assign_boundary_ids();
@@ -46,8 +50,7 @@ class Hype {
 	
 public:
 	
-	Hype(std::vector<double>(*)(double, double), AppCtx);
-	~Hype(); 
+	HyPE_2D(Vector(*)(double, double), AppCtx);
 	void run();
 };
 

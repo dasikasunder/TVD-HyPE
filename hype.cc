@@ -4,11 +4,10 @@
 // Constructor - Takes input parameters and sets memory 
 //----------------------------------------------------------------------------
 
-Hype::Hype(std::vector<double> (*f)(double, double), AppCtx params):
+HyPE_2D::HyPE_2D(Vector (*f)(double, double), AppCtx params):
 	Params(params),
 	tria(params.mesh_file_name),
 	init_func(f),
-	riemann(params.gamma),
 	time(params.initial_time),
 	dt(0.0)
 {
@@ -19,10 +18,10 @@ Hype::Hype(std::vector<double> (*f)(double, double), AppCtx params):
 	
 	// Allocate memory for all the variables 
 	
-	Utilities::allocate_mem_3d(U,   tria.no_cells(), Riemann_Solver::n_comp, 4);
-	Utilities::allocate_mem_2d(W,   tria.no_cells(), Riemann_Solver::n_comp);
-	Utilities::allocate_mem_2d(RHS, tria.no_cells(), Riemann_Solver::n_comp);
-	Utilities::allocate_mem_2d(F,   tria.no_faces(), Riemann_Solver::n_comp);
+	U.resize(extents[tria.no_cells()][nVar][4]); 
+	W.resize(extents[tria.no_cells()][nVar]);
+	RHS.resize(extents[tria.no_cells()][nVar]);
+	F.resize(extents[tria.no_faces()][nVar]);
 	
 	h_min = tria.min_incircle_dia();
 
@@ -31,40 +30,23 @@ Hype::Hype(std::vector<double> (*f)(double, double), AppCtx params):
 }
 
 //----------------------------------------------------------------------------
-// Destructor - Free all the memory  
-//----------------------------------------------------------------------------
-
-Hype::~Hype() {
-	
-	// Free all the memory 
-	
-	Utilities::free_mem_3d(U,   tria.no_cells(), Riemann_Solver::n_comp);
-	Utilities::free_mem_2d(W,   tria.no_cells());
-	Utilities::free_mem_2d(RHS, tria.no_cells());
-	Utilities::free_mem_2d(F,   tria.no_faces());
-	
-}
-
-//----------------------------------------------------------------------------
 // Initialize the solution using the initial conditions 
 //----------------------------------------------------------------------------
 
-void Hype::initialize() {
+void HyPE_2D::initialize() {
 	
 	std::cout << "Initializing the solution" << std::endl; 
 
-	std::vector<double> V(Riemann_Solver::n_comp);
-	std::vector<double> Q(Riemann_Solver::n_comp); 
+	Vector V(extents[nVar]), Q(extents[nVar]);
 	
-	
-	for (int c = 0; c < tria.no_cells(); ++c) {
+	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
 		
-		V = init_func(tria.xc(c), tria.yc(c)); 
+		V = init_func(tria.xc(iCell), tria.yc(iCell)); 
 		
-		riemann.primitive_to_conserved(V, Q); 
+		PDEPrim2Cons(V, Q); 
 		
-		for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-			U[c][n_c][0] = Q[n_c]; 
+		for (int iVar = 0; iVar < nVar; ++iVar)
+			U[iCell][iVar][0] = Q[iVar]; 
 			
 	}
 	
@@ -76,7 +58,7 @@ void Hype::initialize() {
 // To each face in the mesh assign boundary ids 
 //----------------------------------------------------------------------------
 
-void Hype::assign_boundary_ids() {
+void HyPE_2D::assign_boundary_ids() {
 	
 	std::cout << "Assigning boundary id's" << std::endl; 
 	
@@ -84,20 +66,19 @@ void Hype::assign_boundary_ids() {
 
 	// Loop over all the faces 
 	
-	for (int f = 0; f < tria.no_faces(); ++f) {
+	for (int iFace = 0; iFace < tria.no_faces(); ++iFace) {
 		
-		if (tria.face_at_boundary(f)) {
+		if (tria.face_at_boundary(iFace)) {
 			
-			if (std::abs(tria.xf(f)) < 1.0e-12)              // Inlet of the boundary 
-				tria.set_boundary_id(f, 1);
+			if (std::abs(tria.xf(iFace)) < 1.0e-12)              // Inlet of the boundary 
+				tria.set_boundary_id(iFace, 1);
 				
-			else if (std::abs(tria.xf(f) - 3.0) < 1.0e-12)   // Outflow  
-				tria.set_boundary_id(f, 0);
+			else if (std::abs(tria.xf(iFace) - 3.0) < 1.0e-12)   // Outflow  
+				tria.set_boundary_id(iFace, 0);
 			
 			else                                             // Reflective 
-				tria.set_boundary_id(f, 2);
+				tria.set_boundary_id(iFace, 2);
 		}
-		
 	}
 	
 	std::cout << "Done !" << std::endl;
@@ -108,20 +89,19 @@ void Hype::assign_boundary_ids() {
 // In each cell, find the primitive variables 
 //----------------------------------------------------------------------------
 
-void Hype::compute_primitive_variables() {
+void HyPE_2D::compute_primitive_variables() {
 	
-	std::vector<double> V(Riemann_Solver::n_comp);
-	std::vector<double> Q(Riemann_Solver::n_comp);  
-	
-	for (int c = 0; c < tria.no_cells(); ++c) {
+	Vector V(extents[nVar]), Q(extents[nVar]);
 		
-		for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-			Q[n_c] = U[c][n_c][0]; 
+	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
 		
-		riemann.conserved_to_primitive(Q, V);
+		for (int iVar = 0; iVar < nVar; ++iVar)
+			Q[iVar] = U[iCell][iVar][0]; 
 		
-		for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-			W[c][n_c] = V[c]; 
+		PDECons2Prim(Q, V);
+		
+		for (int iVar = 0; iVar < nVar; ++iVar)
+			W[iCell][iVar] = V[iVar]; 
 	}
 }
 
@@ -129,46 +109,42 @@ void Hype::compute_primitive_variables() {
 // Find the RHS in each cell and also compute the time step size 
 //----------------------------------------------------------------------------
 
-void Hype::compute_rhs() {
+void HyPE_2D::compute_rhs() {
 	
-	std::vector<double> QL(Riemann_Solver::n_comp); 
-	std::vector<double> QR(Riemann_Solver::n_comp); 
-	std::vector<double> Flux(Riemann_Solver::n_comp);
-	
-	std::vector<double> VR(Riemann_Solver::n_comp);
-	
+	Vector QL(extents[nVar]), QR(extents[nVar]), VR(extents[nVar]), Flux(extents[nVar]); 
+
 	double s, s_max = 0.0; 
 	
 	// Find the upwind flux on each face 
 	
 	int L_cell_index, R_cell_index;
 	
-	for (int f = 0; f < tria.no_faces(); ++f) {
+	for (int iFace = 0; iFace < tria.no_faces(); ++iFace) {
 		
-		L_cell_index = tria.link_face_to_cell(f, 0);
+		L_cell_index = tria.link_face_to_cell(iFace, 0);
 		
-		for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-			QL[n_c] = U[L_cell_index][n_c][0];
+		for (int iVar = 0; iVar < nVar; ++iVar)
+			QL[iVar] = U[L_cell_index][iVar][0];
 		
 		// Apply boundary conditions for faces at boundaries  
 		
-		if (tria.face_at_boundary(f)) {
+		if (tria.face_at_boundary(iFace)) {
 			
-			if (tria.get_boundary_id(f) == 1) { // Inlet 
+			if (tria.get_boundary_id(iFace) == 1) { // Inlet 
 				
 				VR[0] = 1.4; // Density  
 				VR[1] = 3.0; // x-Velocity 
 				VR[2] = 0.0; // y-Velocity 
 				VR[3] = 1.0; // Pressure 
 			
-				riemann.primitive_to_conserved(VR, QR);
+				PDEPrim2Cons(VR, QR);
 			}
 			
-			else if (tria.get_boundary_id(f) == 2) { // Reflecting wall 
+			else if (tria.get_boundary_id(iFace) == 2) { // Reflecting wall 
 				
 				QR[0] = QL[0];
-				QR[1] = QL[1] - 2.0*QL[1]*tria.nx(f)*tria.nx(f) - 2.0*QL[2]*tria.nx(f)*tria.ny(f); 
-				QR[2] = QL[2] - 2.0*QL[1]*tria.nx(f)*tria.ny(f) - 2.0*QL[2]*tria.ny(f)*tria.ny(f);
+				QR[1] = QL[1] - 2.0*QL[1]*tria.nx(iFace)*tria.nx(iFace) - 2.0*QL[2]*tria.nx(iFace)*tria.ny(iFace); 
+				QR[2] = QL[2] - 2.0*QL[1]*tria.nx(iFace)*tria.ny(iFace) - 2.0*QL[2]*tria.ny(iFace)*tria.ny(iFace);
 				QR[3] = QL[3];
 			}
 			
@@ -183,38 +159,38 @@ void Hype::compute_rhs() {
 		
 		else {
 			
-			R_cell_index = tria.link_face_to_cell(f, 1);
+			R_cell_index = tria.link_face_to_cell(iFace, 1);
 			
-			for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-				QR[n_c] = U[R_cell_index][n_c][0];
+			for (int iVar = 0; iVar < nVar; ++iVar)
+				QR[iVar] = U[R_cell_index][iVar][0];
 		}
 		
-		s = riemann.llf_riemann_solver(QL, QR, tria.nx(f), tria.ny(f), tria.xf(f), tria.yf(f), Flux);
+		s = PDERusanovFlux(QL, QR, tria.nx(iFace), tria.ny(iFace), tria.xf(iFace), tria.yf(iFace), Flux);
 		
 		if (s > s_max)
 			s_max = s; 
 		
-		for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-			F[f][n_c] = Flux[n_c];
+		for (int iVar = 0; iVar < nVar; ++iVar)
+			F[iFace][iVar] = Flux[iVar];
 	}
 	
 	// Now find the RHS in each cell 
 	
 	int global_f; double r1_v; 
 	
-	for (int c = 0; c < tria.no_cells(); ++c) {
+	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
 		
-		for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-			RHS[c][n_c] = 0.0; 
+		for (int iVar = 0; iVar < nVar; ++iVar)
+			RHS[iCell][iVar] = 0.0; 
 			
-		r1_v = 1./tria.vol(c);
+		r1_v = 1./tria.vol(iCell);
 		
 		for (int local_f = 0; local_f < GeometryInfo::faces_per_cell; ++local_f) {
 			
-			global_f = tria.link_cell_to_face(c, local_f);
+			global_f = tria.link_cell_to_face(iCell, local_f);
 			
-			for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-				RHS[c][n_c] += -r1_v*tria.n_sign(c, local_f)*F[global_f][n_c]*tria.areaf(global_f);
+			for (int iVar = 0; iVar < nVar; ++iVar)
+				RHS[iCell][iVar] += -r1_v*tria.n_sign(iCell, local_f)*F[global_f][iVar]*tria.areaf(global_f);
 		}
 	}
 	
@@ -232,7 +208,7 @@ void Hype::compute_rhs() {
 // Solve the system 
 //----------------------------------------------------------------------------
 
-void Hype::solve() {
+void HyPE_2D::solve() {
 
 	while (time < Params.final_time) {
 		
@@ -240,12 +216,10 @@ void Hype::solve() {
 		
 		printf ("time = %4.3e, dt = %4.3e, final time = %4.3e\n", time, dt, Params.final_time);
 		
-		for (int c = 0; c < tria.no_cells(); ++c) {
-			
-			for (int n_c = 0; n_c < Riemann_Solver::n_comp; ++n_c)
-				U[c][n_c][0] += dt*RHS[c][n_c]; 
-		}
-		
+		for (int iCell = 0; iCell < tria.no_cells(); ++iCell)
+			for (int iVar = 0; iVar < nVar; ++iVar)
+				U[iCell][iVar][0] += dt*RHS[iCell][iVar]; 
+	
 		time += dt; 
 	}
 	
@@ -259,7 +233,7 @@ void Hype::solve() {
 // Plot solution in vtk format 
 //----------------------------------------------------------------------------
 
-void Hype::plot_vtk(int i, const int digits) {
+void HyPE_2D::plot_vtk(int i, const int digits) {
 
 	std::ofstream vtk;
 	const std::string filename = "../plots/plot_" + Utilities::int_to_string (i, digits) + ".vtk";
@@ -360,13 +334,14 @@ void Hype::plot_vtk(int i, const int digits) {
 	delete[] Vx_vtrx;
 	delete[] Vy_vtrx;
 	delete[] P_vtrx;
+
 }
 
 //----------------------------------------------------------------------------
 // Put everything together and run the problem 
 //----------------------------------------------------------------------------
 
-void Hype::run() {
+void HyPE_2D::run() {
 
 	initialize(); 
 	assign_boundary_ids();
