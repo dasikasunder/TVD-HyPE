@@ -8,25 +8,87 @@ HyPE_2D::HyPE_2D(Vector (*f)(double, double), AppCtx params):
 	Params(params),
 	tria(params.mesh_file_name),
 	init_func(f),
-	time(params.initial_time),
-	dt(0.0)
+	time(0.0),
+	dt(0.0),
+	time_step(0)
 {
 	
-	std::cout << "----------------------------------------------------------------------------" << std::endl;
-	std::cout << "Allocating memory " << std::endl;
-	std::cout << "No. of cells in the triangulation = " << tria.no_cells() << std::endl; 
+	std::cout << "Allocating memory. ";
+	std::cout << "No. of cells in the triangulation = " << tria.no_cells() << ". "; 
 	
 	// Allocate memory for all the variables 
 	
-	U.resize(extents[tria.no_cells()][nVar][4]); 
-	W.resize(extents[tria.no_cells()][nVar]);
-	RHS.resize(extents[tria.no_cells()][nVar]);
-	F.resize(extents[tria.no_faces()][nVar]);
+	uh.resize(extents[tria.no_cells()][nVar][4]); 
+	wh.resize(extents[tria.no_cells()][nVar]);
+	duh.resize(extents[tria.no_cells()][nVar]);
+	Fu.resize(extents[tria.no_faces()][nVar]);
+	qr.resize(extents[tria.no_faces()]);
 	
 	h_min = tria.min_incircle_dia();
 
+	//-------------------------------------------------------------------------------------
+	// Now start computing gradient matrix 
+	//-------------------------------------------------------------------------------------
+
+	const int n_nb_cells = 3; 
+	int Nb, count; 
+	Matrix A(extents[n_nb_cells][nDim]);
+	double x0, y0, xr, yr, x[3], y[3], r1_vol_nb;
+
+	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
+		
+		x0 = tria.xc(iCell); y0 = tria.yc(iCell);
+
+		for (int iNb = 0; iNb < n_nb_cells; ++iNb) {
+
+			Nb = tria.cell_neighbour(iCell, iNb);
+			count = 1; 
+			
+			// If the neighbouring cell is present 
+
+			if (Nb != -1) {
+
+				// Get the three vertices of the triangle 
+
+				for (int v = 0; v < GeometryInfo::vertices_per_cell; ++v) {
+					x[v] = tria.xv(tria.link_cell_to_vertex(Nb, v)); 
+					y[v] = tria.yv(tria.link_cell_to_vertex(Nb, v)); 
+				}
+				
+				r1_vol_nb = 1.0/tria.vol(Nb);
+			}	
+
+			// If the neighbouring cell is absent 
+			// We will mirror the current cell and construct a ghost cell  
+			
+			else {
+
+				for (int v = 0; v < GeometryInfo::vertices_per_cell; ++v) {
+					
+					if( tria.vrtx_at_boundary(tria.link_cell_to_vertex(iCell, v)) ) {
+						x[count] =  tria.xv(tria.link_cell_to_vertex(iCell, v));
+						y[count] =  tria.yv(tria.link_cell_to_vertex(iCell, v));
+						count++; 
+					}
+
+					else {
+						xr =  tria.xv(tria.link_cell_to_vertex(iCell, v));
+						yr =  tria.yv(tria.link_cell_to_vertex(iCell, v));
+					}
+				}
+
+				reflect_point(xr, yr, x[1], y[1], x[2], y[2], x[0], y[0]); 
+				r1_vol_nb = 1.0/tria.vol(iCell); 
+			}
+			
+			A[iNb][0] = r1_vol_nb*integrate_xmx0(x0, x[0], y[0], x[1], y[1], x[2], y[2]); 
+			A[iNb][1] = r1_vol_nb*integrate_ymy0(y0, x[0], y[0], x[1], y[1], x[2], y[2]);
+		}
+
+		qr[iCell].initialize(A, n_nb_cells, nDim);
+	}
+
 	std::cout << "Done !" << std::endl;
-	std::cout << "----------------------------------------------------------------------------" << std::endl;
 }
 
 //----------------------------------------------------------------------------
@@ -35,7 +97,7 @@ HyPE_2D::HyPE_2D(Vector (*f)(double, double), AppCtx params):
 
 void HyPE_2D::initialize() {
 	
-	std::cout << "Initializing the solution" << std::endl; 
+	std::cout << "Initializing the solution..."; 
 
 	Vector V(extents[nVar]), Q(extents[nVar]);
 	
@@ -46,12 +108,10 @@ void HyPE_2D::initialize() {
 		PDEPrim2Cons(V, Q); 
 		
 		for (int iVar = 0; iVar < nVar; ++iVar)
-			U[iCell][iVar][0] = Q[iVar]; 
-			
+			uh[iCell][iVar][0] = Q[iVar]; 
 	}
 	
 	std::cout << "Done !" << std::endl;
-	std::cout << "----------------------------------------------------------------------------" << std::endl; 
 }
 
 //----------------------------------------------------------------------------
@@ -60,29 +120,19 @@ void HyPE_2D::initialize() {
 
 void HyPE_2D::assign_boundary_ids() {
 	
-	std::cout << "Assigning boundary id's" << std::endl; 
+	std::cout << "Setting boundary conditions..."; 
 	
-	// Usual convention: 0 -> Transmissive/Outlet; 1 -> Inlet/Dirichlet; 2 -> Reflective 
-
 	// Loop over all the faces 
 	
 	for (int iFace = 0; iFace < tria.no_faces(); ++iFace) {
 		
-		if (tria.face_at_boundary(iFace)) {
-			
-			if (std::abs(tria.xf(iFace)) < 1.0e-12)              // Inlet of the boundary 
-				tria.set_boundary_id(iFace, 1);
-				
-			else if (std::abs(tria.xf(iFace) - 3.0) < 1.0e-12)   // Outflow  
-				tria.set_boundary_id(iFace, 0);
-			
-			else                                             // Reflective 
-				tria.set_boundary_id(iFace, 2);
-		}
+		if (tria.face_at_boundary(iFace))
+			tria.set_boundary_cond(iFace, transmissive);
+		
 	}
 	
 	std::cout << "Done !" << std::endl;
-	std::cout << "----------------------------------------------------------------------------" << std::endl; 
+	std::cout << "----------------------------------------------------------------------------" << std::endl;
 }
 
 //----------------------------------------------------------------------------
@@ -96,14 +146,138 @@ void HyPE_2D::compute_primitive_variables() {
 	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
 		
 		for (int iVar = 0; iVar < nVar; ++iVar)
-			Q[iVar] = U[iCell][iVar][0]; 
+			Q[iVar] = uh[iCell][iVar][0]; 
 		
 		PDECons2Prim(Q, V);
 		
 		for (int iVar = 0; iVar < nVar; ++iVar)
-			W[iCell][iVar] = V[iVar]; 
+			wh[iCell][iVar] = V[iVar]; 
 	}
 }
+
+//----------------------------------------------------------------------------
+// Reconstruct the solution in each cell using Barth-Jesperson limiter 
+//----------------------------------------------------------------------------
+
+void HyPE_2D::reconstruct() {
+
+	const int n_nb_cells = 3; 
+	Vector rhs(extents[n_nb_cells]);
+	Vector nb_value(extents[n_nb_cells]);
+	Vector sol(extents[n_nb_cells]);
+	Vector Qf(extents[nVar]);
+	Vector Ff(extents[nVar]);
+	double min_val, max_val, node_val, x_node, y_node, xf, yf, x0, y0, nx, ny, Af, reduce_modes;
+	double temp, r1_v; 
+	int Nb, iFace;
+
+	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
+
+		x0 = tria.xc(iCell); y0 = tria.yc(iCell);
+		r1_v = 1.0/tria.vol(iCell);
+		
+		for (int iVar = 0; iVar < nVar; ++iVar) {
+
+			min_val = uh[iCell][iVar][0]; 
+			max_val = uh[iCell][iVar][0]; 
+			uh[iCell][iVar][3] = 0.0; 
+			reduce_modes = 1.0; 
+			
+			for (int iNb = 0; iNb < n_nb_cells; ++iNb) {
+				
+				Nb = tria.cell_neighbour(iCell, iNb);
+			
+				// If the neighbouring cell is present 
+
+				if (Nb != -1) {
+					nb_value[iNb] = uh[Nb][iVar][0];
+				}
+				
+				// If neighbour cell is absent fill appropriate ghost cell value
+
+				else {
+					nb_value[iNb] = uh[iCell][iVar][0]; // Transmissive boundary 
+				}
+
+				// Find the minimum and maximum in the neighbourhood 
+
+				if (nb_value[iNb] > max_val)
+					max_val = nb_value[iNb];
+				
+				if (nb_value[iNb] < min_val)
+					min_val = nb_value[iNb];
+
+				rhs[iNb] = nb_value[iNb] - uh[iCell][iVar][0];
+			}
+			
+			// Find the non-limited solution 
+
+			qr[iCell].solve(rhs, sol); 
+
+
+			// Limit the solution using Barth-Jesperson limiter 
+
+			for (int v = 0; v < GeometryInfo::vertices_per_cell; ++v) {
+
+				x_node = tria.xv(tria.link_cell_to_vertex(iCell,v));
+				y_node = tria.yv(tria.link_cell_to_vertex(iCell,v));
+
+				node_val = uh[iCell][iVar][0] + sol[0]*(x_node-x0) + sol[1]*(y_node-y0);
+				
+				temp = node_val - uh[iCell][iVar][0];  
+
+				if (std::abs(temp) < 1.0e-12) {
+					reduce_modes = 1.0; 
+				}
+
+				else if (temp > 0.0) {
+					reduce_modes = std::min(reduce_modes, (max_val-uh[iCell][iVar][0])/temp);
+				}
+
+				else {
+					reduce_modes = std::min(reduce_modes, (min_val-uh[iCell][iVar][0])/temp);
+				}
+			}
+
+			// Make sure reduce modes are greater than zero 
+
+			if (reduce_modes > 1.0) {
+				std::cout << reduce_modes << std::endl; 
+			}
+
+			if (reduce_modes < 0.0)
+				reduce_modes = 0.0; 
+
+			// Find the limited solution 
+
+			uh[iCell][iVar][1] = reduce_modes*sol[0]; 
+			uh[iCell][iVar][2] = reduce_modes*sol[1];
+		}
+
+		// After finding the spatial variation, we now need to find the temporal variation
+
+		for (int f = 0; f < GeometryInfo::faces_per_cell; ++f) {
+			
+			iFace = tria.link_cell_to_face(iCell, f); 
+			xf = tria.xf(iFace); yf = tria.yf(iFace); 
+			
+			nx = tria.n_sign(iCell, f)*tria.nx(iFace); 
+			ny = tria.n_sign(iCell, f)*tria.ny(iFace);
+
+			Af = tria.areaf(iFace);
+
+			for (int iVar = 0; iVar < nVar; ++iVar) {
+				Qf[iVar] = uh[iCell][iVar][0] + uh[iCell][iVar][1]*(xf-x0) + uh[iCell][iVar][2]*(yf-y0);
+			}
+
+			PDEConsFlux(Qf, nx, ny, xf, yf, Ff); 
+
+			for (int iVar = 0; iVar < nVar; ++iVar) {
+				uh[iCell][iVar][3] += -r1_v*Af*Ff[iVar];
+			}
+		}
+	}
+} 
 
 //----------------------------------------------------------------------------
 // Find the RHS in each cell and also compute the time step size 
@@ -113,7 +287,7 @@ void HyPE_2D::compute_rhs() {
 	
 	Vector QL(extents[nVar]), QR(extents[nVar]), VR(extents[nVar]), Flux(extents[nVar]); 
 
-	double s, s_max = 0.0; 
+	double x0_L, y0_L, x0_R, y0_R,  xf, yf, s, s_max = 0.0; 
 	
 	// Find the upwind flux on each face 
 	
@@ -123,24 +297,34 @@ void HyPE_2D::compute_rhs() {
 		
 		L_cell_index = tria.link_face_to_cell(iFace, 0);
 		
-		for (int iVar = 0; iVar < nVar; ++iVar)
-			QL[iVar] = U[L_cell_index][iVar][0];
+		xf = tria.xf(iFace);
+		yf = tria.yf(iFace); 
+
+		x0_L = tria.xc(L_cell_index); 
+		y0_L = tria.yc(L_cell_index); 
+		
+		for (int iVar = 0; iVar < nVar; ++iVar) {
+			QL[iVar] = uh[L_cell_index][iVar][0] + 
+			           uh[L_cell_index][iVar][1]*(xf-x0_L) +
+					   uh[L_cell_index][iVar][2]*(yf-y0_L) + 
+					   uh[L_cell_index][iVar][3]*0.5*dt;
+		}
 		
 		// Apply boundary conditions for faces at boundaries  
 		
 		if (tria.face_at_boundary(iFace)) {
 			
-			if (tria.get_boundary_id(iFace) == 1) { // Inlet 
+			if (tria.get_boundary_cond(iFace) == inflow) { 
 				
-				VR[0] = 1.4; // Density  
-				VR[1] = 3.0; // x-Velocity 
-				VR[2] = 0.0; // y-Velocity 
-				VR[3] = 1.0; // Pressure 
+				VR[0] = 8.0;    // Density  
+				VR[1] = 8.25;   // x-Velocity 
+				VR[2] = 0.0;    // y-Velocity 
+				VR[3] = 116.5;  // Pressure 
 			
 				PDEPrim2Cons(VR, QR);
 			}
 			
-			else if (tria.get_boundary_id(iFace) == 2) { // Reflecting wall 
+			else if (tria.get_boundary_cond(iFace) == reflective) {
 				
 				QR[0] = QL[0];
 				QR[1] = QL[1] - 2.0*QL[1]*tria.nx(iFace)*tria.nx(iFace) - 2.0*QL[2]*tria.nx(iFace)*tria.ny(iFace); 
@@ -160,18 +344,26 @@ void HyPE_2D::compute_rhs() {
 		else {
 			
 			R_cell_index = tria.link_face_to_cell(iFace, 1);
+
+			x0_R = tria.xc(R_cell_index);
+			y0_R = tria.yc(R_cell_index); 
 			
-			for (int iVar = 0; iVar < nVar; ++iVar)
-				QR[iVar] = U[R_cell_index][iVar][0];
+			for (int iVar = 0; iVar < nVar; ++iVar) {
+				
+				QR[iVar] = uh[R_cell_index][iVar][0] + 
+			               uh[R_cell_index][iVar][1]*(xf-x0_R) +
+					       uh[R_cell_index][iVar][2]*(yf-y0_R) + 
+					       uh[R_cell_index][iVar][3]*0.5*dt;
+			}
 		}
 		
-		s = PDERusanovFlux(QL, QR, tria.nx(iFace), tria.ny(iFace), tria.xf(iFace), tria.yf(iFace), Flux);
+		s = PDEHLLEMFlux(QL, QR, tria.nx(iFace), tria.ny(iFace), tria.xf(iFace), tria.yf(iFace), Flux);
 		
 		if (s > s_max)
 			s_max = s; 
 		
 		for (int iVar = 0; iVar < nVar; ++iVar)
-			F[iFace][iVar] = Flux[iVar];
+			Fu[iFace][iVar] = Flux[iVar];
 	}
 	
 	// Now find the RHS in each cell 
@@ -181,7 +373,7 @@ void HyPE_2D::compute_rhs() {
 	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
 		
 		for (int iVar = 0; iVar < nVar; ++iVar)
-			RHS[iCell][iVar] = 0.0; 
+			duh[iCell][iVar] = 0.0; 
 			
 		r1_v = 1./tria.vol(iCell);
 		
@@ -190,7 +382,7 @@ void HyPE_2D::compute_rhs() {
 			global_f = tria.link_cell_to_face(iCell, local_f);
 			
 			for (int iVar = 0; iVar < nVar; ++iVar)
-				RHS[iCell][iVar] += -r1_v*tria.n_sign(iCell, local_f)*F[global_f][iVar]*tria.areaf(global_f);
+				duh[iCell][iVar] += -r1_v*tria.n_sign(iCell, local_f)*Fu[global_f][iVar]*tria.areaf(global_f);
 		}
 	}
 	
@@ -200,33 +392,8 @@ void HyPE_2D::compute_rhs() {
 	
 	//  Check size of dt to avoid exceeding output time
 
-	if((time + dt)>Params.final_time)
-		dt = Params.final_time - time;
-}
-
-//----------------------------------------------------------------------------
-// Solve the system 
-//----------------------------------------------------------------------------
-
-void HyPE_2D::solve() {
-
-	while (time < Params.final_time) {
-		
-		compute_rhs(); 
-		
-		printf ("time = %4.3e, dt = %4.3e, final time = %4.3e\n", time, dt, Params.final_time);
-		
-		for (int iCell = 0; iCell < tria.no_cells(); ++iCell)
-			for (int iVar = 0; iVar < nVar; ++iVar)
-				U[iCell][iVar][0] += dt*RHS[iCell][iVar]; 
-	
-		time += dt; 
-	}
-	
-	printf ("time = %4.3e, dt = %4.3e, final time = %4.3e\n", time, dt, Params.final_time);
-	
-	std::cout << "Done !" << std::endl;
-	std::cout << "----------------------------------------------------------------------------" << std::endl;
+	if((time + dt)>Params.tend)
+		dt = Params.tend - time;
 }
 
 //----------------------------------------------------------------------------
@@ -236,12 +403,15 @@ void HyPE_2D::solve() {
 void HyPE_2D::plot_vtk(int i, const int digits) {
 
 	std::ofstream vtk;
-	const std::string filename = "../plots/plot_" + Utilities::int_to_string (i, digits) + ".vtk";
+	const std::string filename = "../plots/sol-" + Utilities::int_to_string (i, digits) + ".vtk";
 	vtk.open (filename);
 	vtk.flags( std::ios::dec | std::ios::scientific );
 	vtk.precision(6);
 
-	Assert(vtk.is_open(), ErrIO(filename));
+	if ( !( vtk.is_open() ) ) {
+		std::cerr << "Error. Unable to open file: " << filename << std::endl; 
+		std::exit(EXIT_FAILURE);
+	}
 	
 	vtk << "# vtk DataFile Version 3.0" << "\n";
 	vtk << "2D Euler" << "\n";
@@ -296,10 +466,10 @@ void HyPE_2D::plot_vtk(int i, const int digits) {
 		Vy_vtrx[v]  = 0.0; P_vtrx[v]  = 0.0; 
 		
 		for (int i = 0; i < tria.no_cells_sharing_vertex(v); ++i) {
-			RHO_vtrx[v] += W[tria.cell_sharing_vertex(v,i)][0];
-			Vx_vtrx[v]  += W[tria.cell_sharing_vertex(v,i)][1];
-			Vy_vtrx[v]  += W[tria.cell_sharing_vertex(v,i)][2];
-			P_vtrx[v]   += W[tria.cell_sharing_vertex(v,i)][3];
+			RHO_vtrx[v] += wh[tria.cell_sharing_vertex(v,i)][0];
+			Vx_vtrx[v]  += wh[tria.cell_sharing_vertex(v,i)][1];
+			Vy_vtrx[v]  += wh[tria.cell_sharing_vertex(v,i)][2];
+			P_vtrx[v]   += wh[tria.cell_sharing_vertex(v,i)][3];
 		}
 		
 		RHO_vtrx[v] /= static_cast<double>(tria.no_cells_sharing_vertex(v));
@@ -345,7 +515,35 @@ void HyPE_2D::run() {
 
 	initialize(); 
 	assign_boundary_ids();
-	solve();
-	plot_vtk();
+	compute_rhs(); // Just to set an initial time step size  
+	
+	// Main loop in time 
+
+	while (time < Params.tend) {
+		
+		reconstruct(); 
+		compute_rhs();
+
+		if (Params.write_interval != 0 ) 
+			if (time_step % Params.write_interval == 0)
+				plot_vtk(time_step, 5); 
+		
+		
+		printf ("time = %4.3e, dt = %4.3e, final time = %4.3e\n", time, dt, Params.tend);
+		
+		for (int iCell = 0; iCell < tria.no_cells(); ++iCell)
+			for (int iVar = 0; iVar < nVar; ++iVar)
+				uh[iCell][iVar][0] += dt*duh[iCell][iVar]; 
+	
+		time += dt; 
+		time_step++; 
+	}
+	
+	printf ("time = %4.3e, dt = %4.3e, final time = %4.3e\n", time, dt, Params.tend);
+	
+	std::cout << "Done !" << std::endl;
+	std::cout << "----------------------------------------------------------------------------" << std::endl;
+	
+	plot_vtk(time_step, 5); 
 	
 }
