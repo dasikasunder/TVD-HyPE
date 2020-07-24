@@ -11,17 +11,22 @@ Triangulation::Triangulation(const std::string& file_name) :
 	n_face_per_cell(3),
 	n_vrtx_per_face(2)
 {
+
 	// First read the file 
 	
 	std::ifstream input_data(file_name);
-	Assert(input_data.is_open(), ErrIO(file_name));
+
+	if ( !(input_data.is_open()) ) {
+		std::cerr << "Error. Unable to open file: " << file_name << std::endl; 
+		std::exit(EXIT_FAILURE);
+	}
 	
 	std::string line;   // Read a line in the text file
 	std::string buffer; // Read a buffer in the text file
 
 	std::getline(input_data, line);
 	std::getline(input_data, line);
-	
+
 	// Get the number of cells in the mesh and vertices that make up each cell 
 	
 	std::istringstream instr(line);
@@ -36,10 +41,13 @@ Triangulation::Triangulation(const std::string& file_name) :
 		instr >> buffer 
 			  >> cell_to_vrtx[c][0]
 		      >> cell_to_vrtx[c][1] 
-		      >> cell_to_vrtx[c][2] ;
-			  
-		AssertThrow(buffer == "5", 
-					ErrMessage("Only triangular cells supported. Some cells are not triangular in the mesh"));
+		      >> cell_to_vrtx[c][2];
+
+	
+		if ( buffer != "5" ) {
+			std::cerr << "Error. Only triangular cells supported. Some cells are not triangular in the mesh" << std::endl; 
+			std::exit(EXIT_FAILURE);
+		}
 	}
 	
 	// Get the number of vertices in the triangulation
@@ -215,7 +223,7 @@ Triangulation::Triangulation(const std::string& file_name) :
 	
 	for (int f = 0; f < n_face; ++f) {
 		
-		boundary_id[f] = 0; 
+		boundary_id[f] = transmissive; 
 		
 		if (face_to_cell[f][1] == -1)
 			boundary_face[f] = true; 
@@ -234,7 +242,42 @@ Triangulation::Triangulation(const std::string& file_name) :
 				boundary_cell[c] = true;
 		}
 	}
+
+	// Tag boundary vertices 
+
+	Utilities::allocate_mem_1d(boundary_vrtx, n_vrtx);
+
+	for (int v = 0; v < n_vrtx; ++v) {
+		boundary_vrtx[v] = false; // First assume no vertex is on boundary. 
+	}
 	
+	
+	for (int f = 0; f < n_face; ++f) {
+		
+		// If the face is on boundary, both the vertices are on its boundary. 
+		
+		if (boundary_face[f]) {
+			boundary_vrtx[face_to_vrtx[f][0]] = true;
+			boundary_vrtx[face_to_vrtx[f][1]] = true; 
+		}
+	}
+
+	// Build cell neighbour link 
+
+	Utilities::allocate_mem_2d(cell_nb, n_cell, GeometryInfo::faces_per_cell);
+
+	for (int c = 0; c < n_cell; ++c) {
+		for (int n_f = 0; n_f < GeometryInfo::faces_per_cell; ++n_f) {
+			
+			f_index = cell_to_face[c][n_f];
+			
+			if (face_to_cell[f_index][0] != c)
+				cell_nb[c][n_f] = face_to_cell[f_index][0];
+			else 
+				cell_nb[c][n_f] = face_to_cell[f_index][1];
+		}
+	}
+
 	// Calculate the area of each face and surface normal center 
 	
 	Utilities::allocate_mem_1d(face_area, n_face);
@@ -351,6 +394,7 @@ Triangulation::Triangulation(const std::string& file_name) :
 
 Triangulation::~Triangulation() {
 	
+	
 	Utilities::free_mem_2d(vrtx_coords, n_vrtx);
 	Utilities::free_mem_2d(cell_coords, n_cell);
 	Utilities::free_mem_2d(face_coords, n_face);
@@ -360,15 +404,16 @@ Triangulation::~Triangulation() {
 	Utilities::free_mem_2d(face_to_vrtx, n_face);
 	Utilities::free_mem_2d(cell_to_face, n_cell);
 	Utilities::free_mem_2d(face_to_cell, n_face);
+	Utilities::free_mem_2d(cell_nb, n_cell);
 	Utilities::free_mem_1d(face_area);
 	Utilities::free_mem_1d(boundary_face);
-	Utilities::free_mem_1d(boundary_cell); 
+	Utilities::free_mem_1d(boundary_cell);
+	Utilities::free_mem_1d(boundary_vrtx); 
 	Utilities::free_mem_1d(boundary_id);
 	Utilities::free_mem_2d(sn, n_face);
 	Utilities::free_mem_2d(sn_sign, n_cell);
 	Utilities::free_mem_1d(vrtx_to_cell1);
 	Utilities::free_mem_1d(vrtx_to_cell2);
-	
 }
 
 //----------------------------------------------------------------------------
@@ -376,9 +421,14 @@ Triangulation::~Triangulation() {
 // error 
 //----------------------------------------------------------------------------
 
-void Triangulation::set_boundary_id(const int& f, const int& b_id) {
-	AssertThrow(boundary_face[f], ErrMessage("You are trying to set boundary id for a face which is not at boundary"));
-	boundary_id[f] = b_id; 
+void Triangulation::set_boundary_cond(const int& f, const boundary_condition& b_cond) {
+	
+	if (!(boundary_face[f])) {
+		std::cerr << "Error. You are trying to set boundary id for a face which is not at boundary" << std::endl; 
+		std::exit(EXIT_FAILURE);
+	}
+	
+	boundary_id[f] = b_cond; 
 }
 
 //----------------------------------------------------------------------------
@@ -453,4 +503,68 @@ double area_of_face(const double& x1, const double& y1,
 					const double& x2, const double& y2) {
 	
 	return std::hypot(x2-x1, y2-y1); 
+}
+
+//----------------------------------------------------------------------------
+// Integrate the function (x-x_0) on a given cell 
+//----------------------------------------------------------------------------
+
+double integrate_xmx0(const double& x0, 
+	                  const double& x1, const double& y1,
+				      const double& x2, const double& y2,
+				      const double& x3, const double& y3) {
+	
+	double term = (1./2.)*x0*(-x1*y2 + x1*y3 + x2*y1 - x2*y3 - x3*y1 + x3*y2) + 
+	              (1./6.)*(x1*(x1*y2 - x1*y3 - x2*y1 + x2*y2 + x3*y1 - x3*y3) + 
+	                       x2*(-x2*y1 + x2*y3 - x3*y2 + x3*y3) + 
+						   x3*(x3*y1 - x3*y2));
+	return term;
+}
+
+//----------------------------------------------------------------------------
+// Integrate the function (y-y_0) on a given cell 
+//----------------------------------------------------------------------------
+
+double integrate_ymy0(const double& y0, 
+	                  const double& x1, const double& y1,
+				      const double& x2, const double& y2,
+				      const double& x3, const double& y3) {
+	
+
+	double term = (1./2.)*y0*(-x1*y2 + x1*y3 + x2*y1 - x2*y3 - x3*y1 + x3*y2) + 
+	              (1./6.)*(y1*(x1*y2 - x1*y3 - x2*y1 - x2*y2 + x3*y1 + x3*y3) + 
+				           y2*(x1*y2 + x2*y3 - x3*y2 - x3*y3) + 
+						   y3*(x2*y3 - x1*y3));
+	return term;
+}
+
+//----------------------------------------------------------------------------
+// Given a point A(x1, y1) and a line defined by L((x2, y2), (x3, y3)), find 
+// the mirror image of the point A wrt to the line L
+//----------------------------------------------------------------------------
+
+void reflect_point(const double& x1, const double& y1,
+				   const double& x2, const double& y2,
+				   const double& x3, const double& y3,
+				   double& xr, double& yr) {
+	double a, b, c, rhs;  
+
+	// If the line is parallel to y-axis, directly use geometric result 
+
+	if (std::abs(x3-x2) < 1.0e-12) {
+		xr = x1 - 2.0*(x1-x3);
+		yr = y1; 
+	}
+
+	// Else, use formula from coordinate geometry 
+
+	else {
+		a = (y3-y2)/(x3-x2);
+		b = -1.0; 
+		c = y2 - a*x2; 
+		rhs = -2.0*(a*x1 + b*y1 + c)/(a*a + b*b);
+
+		xr = x1 + a*rhs;
+		yr = y1 + b*rhs;  
+	}
 }
