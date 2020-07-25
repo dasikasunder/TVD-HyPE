@@ -126,9 +126,19 @@ void HyPE_2D::assign_boundary_ids() {
 	
 	for (int iFace = 0; iFace < tria.no_faces(); ++iFace) {
 		
-		if (tria.face_at_boundary(iFace))
-			tria.set_boundary_cond(iFace, transmissive);
-		
+		if (tria.face_at_boundary(iFace)) {
+			
+			if (std::abs( tria.nx(iFace) + 1.0 ) < 1.0e-12)                // Inlet of the boundary 
+				tria.set_boundary_cond(iFace, inflow);
+			/*
+			else if (std::abs( tria.nx(iFace) - 1.0 ) < 1.0e-12 ||
+			         std::abs( std::abs(tria.ny(iFace)) - 1.0 ) < 1.0e-12) // Outflow
+				tria.set_boundary_id(iFace, 1);
+			*/
+
+			else                                                           // Reflective 
+				tria.set_boundary_cond(iFace, reflective);
+		}
 	}
 	
 	std::cout << "Done !" << std::endl;
@@ -167,21 +177,32 @@ void HyPE_2D::reconstruct() {
 	Vector sol(extents[n_nb_cells]);
 	Vector Qf(extents[nVar]);
 	Vector Ff(extents[nVar]);
+	Vector V_bnd(extents[nVar]);
+	Vector Q_bnd(extents[nVar]);
 	double min_val, max_val, node_val, x_node, y_node, xf, yf, x0, y0, nx, ny, Af, reduce_modes;
 	double temp, r1_v; 
 	int Nb, iFace;
+
+	V_bnd[0] = 8.0;    // Density  
+	V_bnd[1] = 8.25;   // x-Velocity 
+	V_bnd[2] = 0.0;    // y-Velocity 
+	V_bnd[3] = 116.5;  // Pressure 
+
+	PDEPrim2Cons(V_bnd, Q_bnd);
 
 	for (int iCell = 0; iCell < tria.no_cells(); ++iCell) {
 
 		x0 = tria.xc(iCell); y0 = tria.yc(iCell);
 		r1_v = 1.0/tria.vol(iCell);
 		
+		reduce_modes = 1.0; 
+
 		for (int iVar = 0; iVar < nVar; ++iVar) {
 
 			min_val = uh[iCell][iVar][0]; 
 			max_val = uh[iCell][iVar][0]; 
 			uh[iCell][iVar][3] = 0.0; 
-			reduce_modes = 1.0; 
+
 			
 			for (int iNb = 0; iNb < n_nb_cells; ++iNb) {
 				
@@ -196,6 +217,32 @@ void HyPE_2D::reconstruct() {
 				// If neighbour cell is absent fill appropriate ghost cell value
 
 				else {
+					
+					iFace = tria.link_cell_to_face(iCell, iNb);
+					
+					nx = tria.n_sign(iCell, iNb)*tria.nx(iFace); 
+					ny = tria.n_sign(iCell, iNb)*tria.ny(iFace);
+
+					if (tria.get_boundary_cond(iFace) == transmissive) {
+						nb_value[iNb] = uh[Nb][iVar][0];
+					}
+
+					if (tria.get_boundary_cond(iFace) == reflective) {
+						
+						nb_value[iNb] = uh[Nb][iVar][0];
+						
+						if (iVar == 1)
+							nb_value[iNb] = uh[iCell][iVar][1] - 2.0*uh[iCell][iVar][1]*nx*nx - 2.0*uh[iCell][iVar][2]*nx*ny; 
+						
+						if (iVar == 2) 
+							nb_value[iNb] = uh[iCell][iVar][2] - 2.0*uh[iCell][iVar][1]*nx*ny - 2.0*uh[iCell][iVar][1]*ny*ny;
+						
+					}
+
+					if (tria.get_boundary_cond(iFace) == inflow) {
+						nb_value[iNb] = Q_bnd[iVar];
+					}
+
 					nb_value[iNb] = uh[iCell][iVar][0]; // Transmissive boundary 
 				}
 
@@ -213,8 +260,7 @@ void HyPE_2D::reconstruct() {
 			// Find the non-limited solution 
 
 			qr[iCell].solve(rhs, sol); 
-
-
+			
 			// Limit the solution using Barth-Jesperson limiter 
 
 			for (int v = 0; v < GeometryInfo::vertices_per_cell; ++v) {
@@ -227,31 +273,32 @@ void HyPE_2D::reconstruct() {
 				temp = node_val - uh[iCell][iVar][0];  
 
 				if (std::abs(temp) < 1.0e-12) {
-					reduce_modes = 1.0; 
+					reduce_modes = std::min(1.0, reduce_modes);
 				}
 
 				else if (temp > 0.0) {
-					reduce_modes = std::min(reduce_modes, (max_val-uh[iCell][iVar][0])/temp);
+					reduce_modes = std::min(reduce_modes, (max_val-uh[iCell][iVar][0])/(temp+1.0e-12));
 				}
 
 				else {
-					reduce_modes = std::min(reduce_modes, (min_val-uh[iCell][iVar][0])/temp);
+					reduce_modes = std::min(reduce_modes, (min_val-uh[iCell][iVar][0])/(temp+1.0e-12));
 				}
 			}
 
 			// Make sure reduce modes are greater than zero 
-
-			if (reduce_modes > 1.0) {
-				std::cout << reduce_modes << std::endl; 
-			}
 
 			if (reduce_modes < 0.0)
 				reduce_modes = 0.0; 
 
 			// Find the limited solution 
 
-			uh[iCell][iVar][1] = reduce_modes*sol[0]; 
-			uh[iCell][iVar][2] = reduce_modes*sol[1];
+			uh[iCell][iVar][1] = sol[0]; 
+			uh[iCell][iVar][2] = sol[1];
+		}
+
+		for (int iVar = 0; iVar < nVar; ++iVar) {
+			uh[iCell][iVar][1]  = reduce_modes*uh[iCell][iVar][1];
+			uh[iCell][iVar][2]  = reduce_modes*uh[iCell][iVar][2];
 		}
 
 		// After finding the spatial variation, we now need to find the temporal variation
