@@ -42,10 +42,10 @@ class HyPE_2D {
 	
 	multi_array<QRdcmp, 1> qr;    // QR decomposition class for reconstruction
 
-	// 
+	// Main methods of the class 
 
 	void initialize();  
-	void assign_boundary_ids();
+	void set_boundary_conds();
 	void reconstruct();
 	void compute_rhs();
 	void compute_primitive_variables(); 

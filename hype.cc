@@ -115,10 +115,10 @@ void HyPE_2D::initialize() {
 }
 
 //----------------------------------------------------------------------------
-// To each face in the mesh assign boundary ids 
+// To each face in the mesh assign boundary condition 
 //----------------------------------------------------------------------------
 
-void HyPE_2D::assign_boundary_ids() {
+void HyPE_2D::set_boundary_conds() {
 	
 	std::cout << "Setting boundary conditions..."; 
 	
@@ -404,7 +404,7 @@ void HyPE_2D::compute_rhs() {
 			}
 		}
 		
-		s = PDEHLLEMFlux(QL, QR, tria.nx(iFace), tria.ny(iFace), tria.xf(iFace), tria.yf(iFace), Flux);
+		s = PDERusanovFlux(QL, QR, tria.nx(iFace), tria.ny(iFace), tria.xf(iFace), tria.yf(iFace), Flux);
 		
 		if (s > s_max)
 			s_max = s; 
@@ -561,7 +561,7 @@ void HyPE_2D::plot_vtk(int i, const int digits) {
 void HyPE_2D::run() {
 
 	initialize(); 
-	assign_boundary_ids();
+	set_boundary_conds();
 	compute_rhs(); // Just to set an initial time step size  
 	
 	// Main loop in time 
