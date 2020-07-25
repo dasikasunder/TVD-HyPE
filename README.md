@@ -1,6 +1,3 @@
 # TVD-HyPE
 
-Solve non-conservative hyperbolic conservation laws using path-conservative finite-volume TVD methods on unstructured grids. The
-general form of the equations is:
-
-$ \sum_{\forall i}{x_i^{2}} $
+Solve conservative and non-conservative hyperbolic PDE's on unstructured grids using finite volume method. 
