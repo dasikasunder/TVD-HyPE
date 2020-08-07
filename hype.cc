@@ -22,7 +22,7 @@ HyPE_2D::HyPE_2D(Vector (*f)(double, double), AppCtx params):
 	wh.resize(extents[tria.no_cells()][nVar]);
 	duh.resize(extents[tria.no_cells()][nVar]);
 	Fu.resize(extents[tria.no_faces()][nVar]);
-	qr.resize(extents[tria.no_faces()]);
+	qr.resize(extents[tria.no_cells()]);
 	
 	h_min = tria.min_incircle_dia();
 
@@ -127,17 +127,13 @@ void HyPE_2D::set_boundary_conds() {
 	for (int iFace = 0; iFace < tria.no_faces(); ++iFace) {
 		
 		if (tria.face_at_boundary(iFace)) {
-			
-			if (std::abs( tria.nx(iFace) + 1.0 ) < 1.0e-12)                // Inlet of the boundary 
-				tria.set_boundary_cond(iFace, inflow);
-			/*
-			else if (std::abs( tria.nx(iFace) - 1.0 ) < 1.0e-12 ||
-			         std::abs( std::abs(tria.ny(iFace)) - 1.0 ) < 1.0e-12) // Outflow
-				tria.set_boundary_id(iFace, 1);
-			*/
 
-			else                                                           // Reflective 
-				tria.set_boundary_cond(iFace, reflective);
+			tria.set_boundary_cond(iFace, reflective);
+
+			if (std::abs((tria.nx(iFace) + 1.0)) < 1.0e-12) {
+				tria.set_boundary_cond(iFace, transmissive);
+			} 
+			
 		}
 	}
 	
@@ -183,10 +179,12 @@ void HyPE_2D::reconstruct() {
 	double temp, r1_v; 
 	int Nb, iFace;
 
-	V_bnd[0] = 8.0;    // Density  
-	V_bnd[1] = 8.25;   // x-Velocity 
-	V_bnd[2] = 0.0;    // y-Velocity 
-	V_bnd[3] = 116.5;  // Pressure 
+	//-----------------------------------------------------
+	V_bnd[0] = 1.4;  // Density  
+	V_bnd[1] = 3.0;  // x-Velocity 
+	V_bnd[2] = 0.0;  // y-Velocity 
+	V_bnd[3] = 1.0;  // Pressure 
+	//-----------------------------------------------------
 
 	PDEPrim2Cons(V_bnd, Q_bnd);
 
@@ -363,10 +361,10 @@ void HyPE_2D::compute_rhs() {
 			
 			if (tria.get_boundary_cond(iFace) == inflow) { 
 				
-				VR[0] = 8.0;    // Density  
-				VR[1] = 8.25;   // x-Velocity 
-				VR[2] = 0.0;    // y-Velocity 
-				VR[3] = 116.5;  // Pressure 
+				VR[0] = 1.4;  // Density  
+				VR[1] = 3.0;  // x-Velocity 
+				VR[2] = 0.0;  // y-Velocity 
+				VR[3] = 1.0;  // Pressure 
 			
 				PDEPrim2Cons(VR, QR);
 			}
